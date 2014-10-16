@@ -5,6 +5,7 @@ import (
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"github.com/onsi/gomega/gbytes"
 )
 
 var _ = Describe("Event", func() {
@@ -23,6 +24,27 @@ var _ = Describe("Event", func() {
 				Name: "some-name",
 				Data: []byte("some-data\nsome-more-data\n"),
 			}.Encode()).Should(Equal("id: some-id\nevent: some-name\ndata: some-data\ndata: some-more-data\ndata\n\n"))
+		})
+	})
+
+	Describe("Write", func() {
+		var destination *gbytes.Buffer
+
+		BeforeEach(func() {
+			destination = gbytes.NewBuffer()
+		})
+
+		It("writes the encoded event to the destination", func() {
+			event := Event{
+				ID:   "some-id",
+				Name: "some-name",
+				Data: []byte("some-data\nsome-more-data\n"),
+			}
+
+			err := event.Write(destination)
+			Ω(err).ShouldNot(HaveOccurred())
+
+			Ω(destination.Contents()).Should(Equal([]byte(event.Encode())))
 		})
 	})
 })
