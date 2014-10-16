@@ -6,12 +6,6 @@ import (
 	"strings"
 )
 
-type Event struct {
-	ID   string
-	Name string
-	Data []byte
-}
-
 type Reader struct {
 	lastID string
 
