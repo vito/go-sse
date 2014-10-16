@@ -47,10 +47,10 @@ func (event Event) Write(destination io.Writer) error {
 		} else {
 			_, err = fmt.Fprintf(destination, "data: %s\n", line)
 		}
+
 		if err != nil {
 			return err
 		}
-
 	}
 
 	_, err = fmt.Fprintf(destination, "\n")
