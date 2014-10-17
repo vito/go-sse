@@ -55,6 +55,22 @@ var _ = Describe("Reader", func() {
 		})
 	})
 
+	Context("when CRLN is used as a line ending", func() {
+		BeforeEach(func() {
+			eventStream += ":foo bar baz\r\nid: 123\r\nevent: some-event\r\ndata: hello\r\n\r\n"
+		})
+
+		It("properly splits on it", func() {
+			event, err := reader.Next()
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(event).Should(Equal(Event{
+				ID:   "123",
+				Name: "some-event",
+				Data: []byte("hello"),
+			}))
+		})
+	})
+
 	Context("when an event comes on the stream", func() {
 		Context("when an event id specified", func() {
 			BeforeEach(func() {

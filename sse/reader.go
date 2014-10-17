@@ -2,8 +2,8 @@ package sse
 
 import (
 	"bufio"
+	"bytes"
 	"io"
-	"strings"
 )
 
 type Reader struct {
@@ -28,14 +28,20 @@ func (reader *Reader) Next() (Event, error) {
 	// id; track its presence with a bool to distinguish between zero-value
 	idPresent := false
 
+	prefix := []byte{}
 	for {
-		line, err := reader.buf.ReadString('\n')
+		line, isPrefix, err := reader.buf.ReadLine()
 		if err != nil {
 			return Event{}, err
 		}
 
-		// trim trailing \n
-		line = line[0 : len(line)-1]
+		line = append(prefix, line...)
+
+		if isPrefix {
+			prefix = line
+		} else {
+			prefix = []byte{}
+		}
 
 		// empty line; dispatch event
 		if len(line) == 0 {
@@ -63,13 +69,13 @@ func (reader *Reader) Next() (Event, error) {
 
 		var field, value string
 
-		segments := strings.SplitN(line, ":", 2)
+		segments := bytes.SplitN(line, []byte(":"), 2)
 		if len(segments) == 1 {
 			// line with no colon is just the field, with empty value
-			field = segments[0]
+			field = string(segments[0])
 		} else {
-			field = segments[0]
-			value = segments[1]
+			field = string(segments[0])
+			value = string(segments[1])
 		}
 
 		if len(value) > 0 {
