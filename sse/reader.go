@@ -39,6 +39,7 @@ func (reader *Reader) Next() (Event, error) {
 
 		if isPrefix {
 			prefix = line
+			continue
 		} else {
 			prefix = []byte{}
 		}

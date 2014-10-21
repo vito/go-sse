@@ -3,6 +3,7 @@ package sse_test
 import (
 	"bytes"
 	"io"
+	"strings"
 
 	. "github.com/vito/go-sse/sse"
 
@@ -52,6 +53,18 @@ var _ = Describe("Reader", func() {
 				Ω(err).ShouldNot(HaveOccurred())
 				Ω(event).Should(Equal(Event{Data: []byte("hello")}))
 			})
+		})
+	})
+
+	Context("when a sufficiently large data lake appears", func() {
+		BeforeEach(func() {
+			eventStream += "data: " + strings.Repeat("x", 8192) + "\n\n"
+		})
+
+		It("properly reads in the full string before emitting the event", func() {
+			event, err := reader.Next()
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(event).Should(Equal(Event{Data: []byte(strings.Repeat("x", 8192))}))
 		})
 	})
 
