@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"strings"
+	"time"
 
 	. "github.com/vito/go-sse/sse"
 
@@ -85,7 +86,7 @@ var _ = Describe("Reader", func() {
 	})
 
 	Context("when an event comes on the stream", func() {
-		Context("when an event id specified", func() {
+		Context("with an event id specified", func() {
 			BeforeEach(func() {
 				eventStream += `id: 12
 event: some-event
@@ -169,6 +170,26 @@ id
 						}))
 					})
 				})
+			})
+		})
+
+		Context("and it sets a retry time", func() {
+			BeforeEach(func() {
+				eventStream += `id: 12
+event: some-event
+retry: 100
+data: hello
+
+`
+			})
+
+			It("returns an event with the retry duration", func() {
+				Ω(reader.Next()).Should(Equal(Event{
+					ID:    "12",
+					Name:  "some-event",
+					Retry: 100 * time.Millisecond,
+					Data:  []byte("hello"),
+				}))
 			})
 		})
 

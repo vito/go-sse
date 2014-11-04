@@ -4,16 +4,22 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"time"
 )
 
 type Event struct {
-	ID   string
-	Name string
-	Data []byte
+	ID    string
+	Name  string
+	Data  []byte
+	Retry time.Duration
 }
 
 func (event Event) Encode() string {
 	enc := fmt.Sprintf("id: %s\nevent: %s\n", event.ID, event.Name)
+
+	if event.Retry != 0 {
+		enc += fmt.Sprintf("retry: %d\n", event.Retry/1000/1000)
+	}
 
 	for _, line := range bytes.Split(event.Data, []byte("\n")) {
 		if len(line) == 0 {
@@ -37,6 +43,13 @@ func (event Event) Write(destination io.Writer) error {
 	_, err = fmt.Fprintf(destination, "event: %s\n", event.Name)
 	if err != nil {
 		return err
+	}
+
+	if event.Retry != 0 {
+		_, err = fmt.Fprintf(destination, "retry: %d\n", event.Retry/1000/1000)
+		if err != nil {
+			return err
+		}
 	}
 
 	for _, line := range bytes.Split(event.Data, []byte("\n")) {

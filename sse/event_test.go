@@ -1,6 +1,8 @@
 package sse_test
 
 import (
+	"time"
+
 	. "github.com/vito/go-sse/sse"
 
 	. "github.com/onsi/ginkgo"
@@ -24,6 +26,15 @@ var _ = Describe("Event", func() {
 				Name: "some-name",
 				Data: []byte("some-data\nsome-more-data\n"),
 			}.Encode()).Should(Equal("id: some-id\nevent: some-name\ndata: some-data\ndata: some-more-data\ndata\n\n"))
+		})
+
+		It("includes retry if present", func() {
+			Ω(Event{
+				ID:    "some-id",
+				Name:  "some-name",
+				Data:  []byte("some-data"),
+				Retry: 123 * time.Millisecond,
+			}.Encode()).Should(Equal("id: some-id\nevent: some-name\nretry: 123\ndata: some-data\n\n"))
 		})
 	})
 

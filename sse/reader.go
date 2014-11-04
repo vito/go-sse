@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"io"
+	"strconv"
+	"time"
 )
 
 type Reader struct {
@@ -94,6 +96,11 @@ func (reader *Reader) Next() (Event, error) {
 			event.Name = value
 		case "data":
 			event.Data = append(event.Data, []byte(value+"\n")...)
+		case "retry":
+			retryInMS, err := strconv.Atoi(value)
+			if err == nil {
+				event.Retry = time.Duration(retryInMS) * time.Millisecond
+			}
 		}
 	}
 }
