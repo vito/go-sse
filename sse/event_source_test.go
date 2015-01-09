@@ -22,17 +22,81 @@ var _ = Describe("EventSource", func() {
 
 	BeforeEach(func() {
 		server = ghttp.NewServer()
+		url := server.URL()
 
 		source = &EventSource{
 			Client:               http.DefaultClient,
 			DefaultRetryInterval: 100 * time.Millisecond,
 			CreateRequest: func() *http.Request {
-				request, err := http.NewRequest("GET", server.URL(), nil)
+				request, err := http.NewRequest("GET", url, nil)
 				Ω(err).ShouldNot(HaveOccurred())
 
 				return request
 			},
 		}
+	})
+
+	Context("when connecting explicitly", func() {
+		Context("when the server returns ok", func() {
+			BeforeEach(func() {
+				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusOK, ""))
+			})
+
+			It("does not error", func() {
+				err := source.Connect()
+				Ω(err).ShouldNot(HaveOccurred())
+			})
+		})
+
+		// See http://www.w3.org/TR/eventsource/#processing-model for
+		// details on re-establishing the connection
+		Context("when the server returns a non-retryable error", func() {
+			BeforeEach(func() {
+				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusBadRequest, ""))
+			})
+
+			It("returns a BadResponseError", func() {
+				err := source.Connect()
+				Ω(err).Should(BeAssignableToTypeOf(BadResponseError{}))
+			})
+		})
+
+		Context("when the server is not running", func() {
+			BeforeEach(func() {
+				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusOK, ""))
+				server.Close()
+			})
+
+			It("retries indefinitely", func() {
+				doneChan := make(chan struct{})
+
+				go func() {
+					source.Connect()
+					close(doneChan)
+				}()
+
+				Consistently(doneChan).ShouldNot(BeClosed())
+			})
+		})
+
+		// See http://www.w3.org/TR/eventsource/#processing-model for
+		// details on re-establishing the connection
+		Context("when the server consistently returns retryable errors", func() {
+			BeforeEach(func() {
+				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusInternalServerError, ""))
+			})
+
+			It("retries indefinitely", func() {
+				doneChan := make(chan struct{})
+
+				go func() {
+					source.Connect()
+					close(doneChan)
+				}()
+
+				Consistently(doneChan).ShouldNot(BeClosed())
+			})
+		})
 	})
 
 	Context("when the connection breaks after events are read", func() {

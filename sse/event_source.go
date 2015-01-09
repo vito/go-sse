@@ -30,12 +30,12 @@ type EventSource struct {
 
 func (source *EventSource) Next() (Event, error) {
 	for {
-		reader, err := source.acquireReader()
+		err := source.Connect()
 		if err != nil {
 			return Event{}, err
 		}
 
-		event, err := reader.Next()
+		event, err := source.currentReader.Next()
 		if err == nil {
 			source.lastEventID = event.ID
 
@@ -76,9 +76,9 @@ func (source *EventSource) Close() error {
 	return nil
 }
 
-func (source *EventSource) acquireReader() (*Reader, error) {
+func (source *EventSource) Connect() error {
 	if source.currentReader != nil {
-		return source.currentReader, nil
+		return nil
 	}
 
 	for {
@@ -97,7 +97,7 @@ func (source *EventSource) acquireReader() (*Reader, error) {
 			source.currentReader = NewReader(res.Body)
 			source.currentBody = res.Body
 
-			return source.currentReader, nil
+			return nil
 
 		// reestablish the connection
 		case http.StatusInternalServerError,
@@ -112,7 +112,7 @@ func (source *EventSource) acquireReader() (*Reader, error) {
 		default:
 			res.Body.Close()
 
-			return nil, BadResponseError{
+			return BadResponseError{
 				Response: res,
 			}
 		}
