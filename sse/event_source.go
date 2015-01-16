@@ -92,6 +92,7 @@ func (source *EventSource) Next() (Event, error) {
 func (source *EventSource) Close() error {
 	source.lock.Lock()
 	defer source.lock.Unlock()
+	defer func() { source.currentReadCloser = nil }()
 
 	source.closed = true
 
@@ -101,8 +102,6 @@ func (source *EventSource) Close() error {
 			return err
 		}
 	}
-
-	source.currentReadCloser = nil
 
 	return nil
 }
