@@ -367,4 +367,228 @@ var _ = Describe("EventSource", func() {
 			})
 		})
 	}
+
+	Describe("handling errors while reading events", func() {
+		var eventChan chan Event
+		var errChan chan error
+
+		BeforeEach(func() {
+			eventChan = make(chan Event, 1)
+			errChan = make(chan error, 1)
+		})
+
+		Context("when the event reader is closed", func() {
+			BeforeEach(func() {
+				flushedChan := make(chan struct{})
+
+				server.AppendHandlers(
+					func(w http.ResponseWriter, r *http.Request) {
+						closeNotify := w.(http.CloseNotifier).CloseNotify()
+						flusher := w.(http.Flusher)
+
+						w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+						w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+						w.Header().Add("Connection", "keep-alive")
+
+						w.WriteHeader(http.StatusOK)
+
+						flusher.Flush()
+						close(flushedChan)
+						<-closeNotify
+					},
+					func(w http.ResponseWriter, r *http.Request) {
+						flusher := w.(http.Flusher)
+
+						w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+						w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+						w.Header().Add("Connection", "keep-alive")
+
+						w.WriteHeader(http.StatusOK)
+
+						flusher.Flush()
+
+						Event{
+							ID:   "2",
+							Data: []byte("hello again"),
+						}.Write(w)
+
+						flusher.Flush()
+					},
+				)
+
+				doneCh := make(chan struct{})
+				go func() {
+					event, err := source.Next()
+					if err != nil {
+						errChan <- err
+					} else {
+						eventChan <- event
+					}
+					close(doneCh)
+				}()
+
+				<-flushedChan
+				err := source.Close()
+				Ω(err).ShouldNot(HaveOccurred())
+				<-doneCh
+			})
+
+			It("returns ErrReadFromClosedSource", func() {
+				Eventually(errChan).Should(Receive(Equal(ErrReadFromClosedSource)))
+			})
+
+			Context("when trying to call Next again", func() {
+				var err error
+
+				BeforeEach(func() {
+					_, err = source.Next()
+				})
+
+				It("immediately returns ErrReadFromClosedSource", func() {
+					Ω(err).Should(Equal(ErrReadFromClosedSource))
+				})
+			})
+
+			Context("when reconnecting", func() {
+				BeforeEach(func() {
+					err := source.Connect()
+					Ω(err).ShouldNot(HaveOccurred())
+				})
+
+				It("does not immediately return ErrReadFromClosedSource when reading from Next again", func() {
+					event, err := source.Next()
+					Ω(err).ShouldNot(HaveOccurred())
+					Ω(event.ID).Should(Equal("2"))
+				})
+			})
+		})
+
+		Context("when there are no more events", func() {
+			BeforeEach(func() {
+				server.AppendHandlers(
+					func(w http.ResponseWriter, r *http.Request) {
+						flusher := w.(http.Flusher)
+
+						w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+						w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+						w.Header().Add("Connection", "keep-alive")
+
+						w.WriteHeader(http.StatusOK)
+
+						flusher.Flush()
+					},
+					func(w http.ResponseWriter, r *http.Request) {
+						flusher := w.(http.Flusher)
+						closeNotify := w.(http.CloseNotifier).CloseNotify()
+
+						w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+						w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+						w.Header().Add("Connection", "keep-alive")
+
+						w.WriteHeader(http.StatusOK)
+
+						flusher.Flush()
+
+						Event{
+							ID:   "2",
+							Data: []byte("hello again"),
+						}.Write(w)
+
+						flusher.Flush()
+
+						<-closeNotify
+					},
+				)
+
+				doneCh := make(chan struct{})
+				go func() {
+					event, err := source.Next()
+					if err != nil {
+						errChan <- err
+					} else {
+						eventChan <- event
+					}
+					close(doneCh)
+				}()
+
+				<-doneCh
+			})
+
+			It("returns io.EOF", func() {
+				Eventually(errChan).Should(Receive(Equal(io.EOF)))
+			})
+
+			Context("when trying to call Next again", func() {
+				var err error
+
+				BeforeEach(func() {
+					_, err = source.Next()
+				})
+
+				It("immediately returns ErrReadFromClosedSource", func() {
+					Ω(err).Should(Equal(ErrReadFromClosedSource))
+				})
+			})
+
+			Context("when reconnecting", func() {
+				BeforeEach(func() {
+					err := source.Connect()
+					Ω(err).ShouldNot(HaveOccurred())
+				})
+
+				It("does not immediately error when reading from Next again", func() {
+					event, err := source.Next()
+					Ω(err).ShouldNot(HaveOccurred())
+					Ω(event.ID).Should(Equal("2"))
+				})
+			})
+		})
+
+		// Context("when an unrecognized error occurs", func() {
+		// 	BeforeEach(func() {
+		// 		server.AppendHandlers(
+		// 			func(w http.ResponseWriter, r *http.Request) { // Connect
+		// 				flusher := w.(http.Flusher)
+		// 				w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+		// 				w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+		// 				w.Header().Add("Connection", "keep-alive")
+
+		// 				w.WriteHeader(http.StatusOK)
+
+		// 				for {
+		// 					w.Write([]byte("hello"))
+		// 					flusher.Flush()
+		// 				}
+		// 			},
+		// 			func(w http.ResponseWriter, r *http.Request) {
+		// 				flusher := w.(http.Flusher)
+
+		// 				w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+		// 				w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+		// 				w.Header().Add("Connection", "keep-alive")
+
+		// 				w.WriteHeader(http.StatusOK)
+
+		// 				Event{
+		// 					ID:   "2",
+		// 					Data: []byte("hello again"),
+		// 				}.Write(w)
+
+		// 				flusher.Flush()
+		// 			},
+		// 		)
+
+		// 		err := source.Connect()
+		// 		Ω(err).ShouldNot(HaveOccurred())
+		// 		server.CloseClientConnections()
+		// 	})
+
+		// 	It("retries", func() {
+		// 		Ω(source.Next()).Should(Equal(Event{
+		// 			ID:   "2",
+		// 			Data: []byte("hello again"),
+		// 		}))
+		// 	})
+		// })
+	})
 })

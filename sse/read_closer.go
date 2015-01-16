@@ -3,28 +3,45 @@ package sse
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
 	"strconv"
 	"time"
 )
 
-type Reader struct {
+type ReadCloser struct {
 	lastID string
 
-	buf *bufio.Reader
+	buf         *bufio.Reader
+	closeSource func() error
+	closed      bool
 }
 
-func NewReader(source io.Reader) *Reader {
-	return &Reader{
-		buf: bufio.NewReader(source),
+func NewReadCloser(source io.ReadCloser) *ReadCloser {
+	return &ReadCloser{
+		closeSource: func() error { return source.Close() },
+		buf:         bufio.NewReader(source),
 	}
 }
 
-func (reader *Reader) Next() (Event, error) {
+var alreadyClosedError = errors.New("ReadCloser already closed")
+
+func (rc *ReadCloser) Close() error {
+	if rc.closed {
+		return alreadyClosedError
+	}
+
+	rc.closed = true
+	err := rc.closeSource()
+
+	return err
+}
+
+func (rc *ReadCloser) Next() (Event, error) {
 	var event Event
 
 	// event ID defaults to last ID per the spec
-	event.ID = reader.lastID
+	event.ID = rc.lastID
 
 	// if an empty id is explicitly given, it sets the value and resets the last
 	// id; track its presence with a bool to distinguish between zero-value
@@ -32,7 +49,7 @@ func (reader *Reader) Next() (Event, error) {
 
 	prefix := []byte{}
 	for {
-		line, isPrefix, err := reader.buf.ReadLine()
+		line, isPrefix, err := rc.buf.ReadLine()
 		if err != nil {
 			return Event{}, err
 		}
@@ -55,7 +72,7 @@ func (reader *Reader) Next() (Event, error) {
 
 			if idPresent {
 				// record last ID
-				reader.lastID = event.ID
+				rc.lastID = event.ID
 			}
 
 			// trim terminating linebreak
