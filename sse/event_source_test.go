@@ -13,6 +13,20 @@ import (
 	"github.com/onsi/gomega/ghttp"
 )
 
+type failedThenSucceedsRoundTripper struct {
+	failCount   int
+	timesToFail int
+}
+
+func (f *failedThenSucceedsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if f.failCount < f.timesToFail {
+		f.failCount++
+		return nil, fmt.Errorf("failed %d times (will fail %d times)", f.failCount, f.timesToFail)
+	}
+
+	return http.DefaultTransport.RoundTrip(req)
+}
+
 var _ = Describe("EventSource", func() {
 	var (
 		server *ghttp.Server
@@ -62,39 +76,61 @@ var _ = Describe("EventSource", func() {
 		})
 
 		Context("when the server is not running", func() {
+			var originalURL string
+
 			BeforeEach(func() {
-				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusOK, ""))
-				server.Close()
+				originalURL = server.URL()
+
+				server.AppendHandlers(ghttp.RespondWith(http.StatusOK, ""))
 			})
 
-			It("retries indefinitely", func() {
-				doneChan := make(chan struct{})
+			It("retries until the server responds successfully", func() {
+				transport := &failedThenSucceedsRoundTripper{
+					timesToFail: 3,
+				}
 
-				go func() {
-					source.Connect()
-					close(doneChan)
-				}()
+				httpClient := http.Client{
+					Transport: transport,
+				}
 
-				Consistently(doneChan).ShouldNot(BeClosed())
+				eventSource := &EventSource{
+					Client:               &httpClient,
+					DefaultRetryInterval: 100 * time.Millisecond,
+					CreateRequest: func() *http.Request {
+						request, err := http.NewRequest("GET", originalURL, nil)
+						Ω(err).ShouldNot(HaveOccurred())
+
+						return request
+					},
+				}
+
+				Eventually(eventSource.Connect).ShouldNot(HaveOccurred())
+				Ω(transport.failCount).Should(Equal(3))
 			})
 		})
 
 		// See http://www.w3.org/TR/eventsource/#processing-model for
 		// details on re-establishing the connection
 		Context("when the server consistently returns retryable errors", func() {
+			var gotOKChan chan struct{}
+
 			BeforeEach(func() {
-				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusInternalServerError, ""))
+				gotOKChan = make(chan struct{})
+
+				server.AppendHandlers(
+					ghttp.RespondWith(http.StatusInternalServerError, ""),
+					ghttp.RespondWith(http.StatusInternalServerError, ""),
+					ghttp.RespondWith(http.StatusInternalServerError, ""),
+					func(rw http.ResponseWriter, r *http.Request) {
+						close(gotOKChan)
+						rw.WriteHeader(http.StatusOK)
+					},
+				)
 			})
 
 			It("retries indefinitely", func() {
-				doneChan := make(chan struct{})
-
-				go func() {
-					source.Connect()
-					close(doneChan)
-				}()
-
-				Consistently(doneChan).ShouldNot(BeClosed())
+				Eventually(source.Connect).ShouldNot(HaveOccurred())
+				Ω(gotOKChan).Should(BeClosed())
 			})
 		})
 	})
