@@ -42,12 +42,14 @@ type EventSource struct {
 	retryInterval     time.Duration
 	lock              sync.Mutex
 	lastEventIDLock   sync.Mutex
-	closed            bool
+	closed            chan struct{}
 }
 
 func (source *EventSource) Next() (Event, error) {
-	if source.closed {
-		return Event{}, ErrReadFromClosedSource
+	select {
+	case <-source.closed:
+		return Event{}, ErrSourceClosed
+	default:
 	}
 
 	for {
@@ -75,9 +77,11 @@ func (source *EventSource) Next() (Event, error) {
 		}
 
 		source.lock.Lock()
-		if source.closed {
+		select {
+		case <-source.closed:
 			source.lock.Unlock()
-			return Event{}, ErrReadFromClosedSource
+			return Event{}, ErrSourceClosed
+		default:
 		}
 		source.lock.Unlock()
 
@@ -94,7 +98,14 @@ func (source *EventSource) Close() error {
 	defer source.lock.Unlock()
 	defer func() { source.currentReadCloser = nil }()
 
-	source.closed = true
+	select {
+	case <-source.closed:
+	default:
+		if source.closed == nil {
+			source.closed = make(chan struct{})
+		}
+		close(source.closed)
+	}
 
 	if source.currentReadCloser != nil {
 		err := source.currentReadCloser.Close()
@@ -114,45 +125,51 @@ func (source *EventSource) Connect() error {
 	}
 	source.lock.Unlock()
 
+CONNECT:
 	for {
-		source.lock.Lock()
-		req := source.CreateRequest()
-
-		source.lastEventIDLock.Lock()
-		req.Header.Set("Last-Event-ID", source.lastEventID)
-		source.lastEventIDLock.Unlock()
-
-		res, err := source.Client.Do(req)
-		if err != nil {
-			source.lock.Unlock()
-			source.waitForRetry()
-			continue
-		}
-
-		switch res.StatusCode {
-		case http.StatusOK:
-			source.currentReadCloser = NewReadCloser(res.Body)
-			source.closed = false
-			source.lock.Unlock()
-			return nil
-
-		// reestablish the connection
-		case http.StatusInternalServerError,
-			http.StatusBadGateway,
-			http.StatusServiceUnavailable,
-			http.StatusGatewayTimeout:
-			res.Body.Close()
-			source.lock.Unlock()
-			source.waitForRetry()
-			continue
-
-		// fail the connection
+		select {
+		case <-source.closed:
+			return ErrSourceClosed
 		default:
-			source.lock.Unlock()
-			res.Body.Close()
+			source.lock.Lock()
+			req := source.CreateRequest()
 
-			return BadResponseError{
-				Response: res,
+			source.lastEventIDLock.Lock()
+			req.Header.Set("Last-Event-ID", source.lastEventID)
+			source.lastEventIDLock.Unlock()
+
+			res, err := source.Client.Do(req)
+			if err != nil {
+				source.lock.Unlock()
+				source.waitForRetry()
+				continue CONNECT
+			}
+
+			switch res.StatusCode {
+			case http.StatusOK:
+				source.currentReadCloser = NewReadCloser(res.Body)
+				source.closed = make(chan struct{})
+				source.lock.Unlock()
+				return nil
+
+			// reestablish the connection
+			case http.StatusInternalServerError,
+				http.StatusBadGateway,
+				http.StatusServiceUnavailable,
+				http.StatusGatewayTimeout:
+				res.Body.Close()
+				source.lock.Unlock()
+				source.waitForRetry()
+				continue CONNECT
+
+			// fail the connection
+			default:
+				source.lock.Unlock()
+				res.Body.Close()
+
+				return BadResponseError{
+					Response: res,
+				}
 			}
 		}
 	}

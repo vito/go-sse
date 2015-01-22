@@ -1,6 +1,7 @@
 package sse_test
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,15 @@ func (f *failedThenSucceedsRoundTripper) RoundTrip(req *http.Request) (*http.Res
 	return http.DefaultTransport.RoundTrip(req)
 }
 
+type failingRoundTripper struct {
+	cb func()
+}
+
+func (f *failingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.cb()
+	return nil, errors.New("failed to connect")
+}
+
 var _ = Describe("EventSource", func() {
 	var (
 		server *ghttp.Server
@@ -48,6 +58,25 @@ var _ = Describe("EventSource", func() {
 				return request
 			},
 		}
+	})
+
+	Context("when closing an unused EventSource", func() {
+		var err error
+
+		BeforeEach(func() {
+			err = source.Close()
+		})
+
+		It("does not return an error", func() {
+			Ω(err).ShouldNot(HaveOccurred())
+		})
+
+		Context("and then calling connect", func() {
+			It("returns ErrClosedSource", func() {
+				err := source.Connect()
+				Ω(err).Should(Equal(ErrSourceClosed))
+			})
+		})
 	})
 
 	Context("when connecting explicitly", func() {
@@ -106,6 +135,46 @@ var _ = Describe("EventSource", func() {
 
 				Eventually(eventSource.Connect).ShouldNot(HaveOccurred())
 				Ω(transport.failCount).Should(Equal(3))
+			})
+
+			Context("when closing during the connection attempt", func() {
+				var originalURL string
+
+				BeforeEach(func() {
+					originalURL = server.URL()
+
+					server.AppendHandlers(ghttp.RespondWith(http.StatusOK, ""))
+				})
+
+				It("returns ErrClosedSource", func() {
+					var eventSource *EventSource
+
+					transport := &failingRoundTripper{
+						cb: func() {
+							go func() {
+								err := eventSource.Close()
+								Ω(err).ShouldNot(HaveOccurred())
+							}()
+						},
+					}
+
+					httpClient := http.Client{
+						Transport: transport,
+					}
+
+					eventSource = &EventSource{
+						Client:               &httpClient,
+						DefaultRetryInterval: 100 * time.Millisecond,
+						CreateRequest: func() *http.Request {
+							request, err := http.NewRequest("GET", originalURL, nil)
+							Ω(err).ShouldNot(HaveOccurred())
+
+							return request
+						},
+					}
+
+					Eventually(eventSource.Connect).Should(Equal(ErrSourceClosed))
+				})
 			})
 		})
 
@@ -469,8 +538,15 @@ var _ = Describe("EventSource", func() {
 				<-doneCh
 			})
 
-			It("returns ErrReadFromClosedSource", func() {
-				Eventually(errChan).Should(Receive(Equal(ErrReadFromClosedSource)))
+			It("returns ErrSourceClosed", func() {
+				Eventually(errChan).Should(Receive(Equal(ErrSourceClosed)))
+			})
+
+			Context("when calling Close again", func() {
+				It("does not return an error", func() {
+					err := source.Close()
+					Ω(err).ShouldNot(HaveOccurred())
+				})
 			})
 
 			Context("when trying to call Next again", func() {
@@ -480,21 +556,16 @@ var _ = Describe("EventSource", func() {
 					_, err = source.Next()
 				})
 
-				It("immediately returns ErrReadFromClosedSource", func() {
-					Ω(err).Should(Equal(ErrReadFromClosedSource))
+				It("immediately returns ErrSourceClosed", func() {
+					Ω(err).Should(Equal(ErrSourceClosed))
 				})
 			})
 
 			Context("when reconnecting", func() {
-				BeforeEach(func() {
+				It("immediately returns ErrSourceClosed", func() {
 					err := source.Connect()
-					Ω(err).ShouldNot(HaveOccurred())
-				})
+					Ω(err).Should(Equal(ErrSourceClosed))
 
-				It("does not immediately return ErrReadFromClosedSource when reading from Next again", func() {
-					event, err := source.Next()
-					Ω(err).ShouldNot(HaveOccurred())
-					Ω(event.ID).Should(Equal("2"))
 				})
 			})
 		})
@@ -554,77 +625,24 @@ var _ = Describe("EventSource", func() {
 				Eventually(errChan).Should(Receive(Equal(io.EOF)))
 			})
 
-			Context("when trying to call Next again", func() {
+			Context("when calling Next again", func() {
 				var err error
 
 				BeforeEach(func() {
 					_, err = source.Next()
 				})
 
-				It("immediately returns ErrReadFromClosedSource", func() {
-					Ω(err).Should(Equal(ErrReadFromClosedSource))
+				It("immediately returns ErrSourceClosed", func() {
+					Ω(err).Should(Equal(ErrSourceClosed))
 				})
 			})
 
 			Context("when reconnecting", func() {
-				BeforeEach(func() {
+				It("immediately returns ErrSourceClosed", func() {
 					err := source.Connect()
-					Ω(err).ShouldNot(HaveOccurred())
-				})
-
-				It("does not immediately error when reading from Next again", func() {
-					event, err := source.Next()
-					Ω(err).ShouldNot(HaveOccurred())
-					Ω(event.ID).Should(Equal("2"))
+					Ω(err).Should(Equal(ErrSourceClosed))
 				})
 			})
 		})
-
-		// Context("when an unrecognized error occurs", func() {
-		// 	BeforeEach(func() {
-		// 		server.AppendHandlers(
-		// 			func(w http.ResponseWriter, r *http.Request) { // Connect
-		// 				flusher := w.(http.Flusher)
-		// 				w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
-		// 				w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
-		// 				w.Header().Add("Connection", "keep-alive")
-
-		// 				w.WriteHeader(http.StatusOK)
-
-		// 				for {
-		// 					w.Write([]byte("hello"))
-		// 					flusher.Flush()
-		// 				}
-		// 			},
-		// 			func(w http.ResponseWriter, r *http.Request) {
-		// 				flusher := w.(http.Flusher)
-
-		// 				w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
-		// 				w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
-		// 				w.Header().Add("Connection", "keep-alive")
-
-		// 				w.WriteHeader(http.StatusOK)
-
-		// 				Event{
-		// 					ID:   "2",
-		// 					Data: []byte("hello again"),
-		// 				}.Write(w)
-
-		// 				flusher.Flush()
-		// 			},
-		// 		)
-
-		// 		err := source.Connect()
-		// 		Ω(err).ShouldNot(HaveOccurred())
-		// 		server.CloseClientConnections()
-		// 	})
-
-		// 	It("retries", func() {
-		// 		Ω(source.Next()).Should(Equal(Event{
-		// 			ID:   "2",
-		// 			Data: []byte("hello again"),
-		// 		}))
-		// 	})
-		// })
 	})
 })
