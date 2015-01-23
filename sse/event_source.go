@@ -83,9 +83,9 @@ func (source *EventSource) Next() (Event, error) {
 			return Event{}, ErrSourceClosed
 		default:
 		}
-		source.lock.Unlock()
 
 		source.currentReadCloser = nil
+		source.lock.Unlock()
 
 		source.waitForRetry()
 	}
