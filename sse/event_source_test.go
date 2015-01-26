@@ -48,16 +48,16 @@ var _ = Describe("EventSource", func() {
 		server = ghttp.NewServer()
 		url := server.URL()
 
-		source = &EventSource{
-			Client:               http.DefaultClient,
-			DefaultRetryInterval: 100 * time.Millisecond,
-			CreateRequest: func() *http.Request {
+		source = NewEventSource(
+			http.DefaultClient,
+			100*time.Millisecond,
+			func() *http.Request {
 				request, err := http.NewRequest("GET", url, nil)
 				Ω(err).ShouldNot(HaveOccurred())
 
 				return request
 			},
-		}
+		)
 	})
 
 	Context("when closing an unused EventSource", func() {
@@ -69,138 +69,6 @@ var _ = Describe("EventSource", func() {
 
 		It("does not return an error", func() {
 			Ω(err).ShouldNot(HaveOccurred())
-		})
-
-		Context("and then calling connect", func() {
-			It("returns ErrClosedSource", func() {
-				err := source.Connect()
-				Ω(err).Should(Equal(ErrSourceClosed))
-			})
-		})
-	})
-
-	Context("when connecting explicitly", func() {
-		Context("when the server returns ok", func() {
-			BeforeEach(func() {
-				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusOK, ""))
-			})
-
-			It("does not error", func() {
-				err := source.Connect()
-				Ω(err).ShouldNot(HaveOccurred())
-			})
-		})
-
-		// See http://www.w3.org/TR/eventsource/#processing-model for
-		// details on re-establishing the connection
-		Context("when the server returns a non-retryable error", func() {
-			BeforeEach(func() {
-				server.RouteToHandler("GET", "/", ghttp.RespondWith(http.StatusBadRequest, ""))
-			})
-
-			It("returns a BadResponseError", func() {
-				err := source.Connect()
-				Ω(err).Should(BeAssignableToTypeOf(BadResponseError{}))
-			})
-		})
-
-		Context("when the server is not running", func() {
-			var originalURL string
-
-			BeforeEach(func() {
-				originalURL = server.URL()
-
-				server.AppendHandlers(ghttp.RespondWith(http.StatusOK, ""))
-			})
-
-			It("retries until the server responds successfully", func() {
-				transport := &failedThenSucceedsRoundTripper{
-					timesToFail: 3,
-				}
-
-				httpClient := http.Client{
-					Transport: transport,
-				}
-
-				eventSource := &EventSource{
-					Client:               &httpClient,
-					DefaultRetryInterval: 100 * time.Millisecond,
-					CreateRequest: func() *http.Request {
-						request, err := http.NewRequest("GET", originalURL, nil)
-						Ω(err).ShouldNot(HaveOccurred())
-
-						return request
-					},
-				}
-
-				Eventually(eventSource.Connect).ShouldNot(HaveOccurred())
-				Ω(transport.failCount).Should(Equal(3))
-			})
-
-			Context("when closing during the connection attempt", func() {
-				var originalURL string
-
-				BeforeEach(func() {
-					originalURL = server.URL()
-
-					server.AppendHandlers(ghttp.RespondWith(http.StatusOK, ""))
-				})
-
-				It("returns ErrClosedSource", func() {
-					var eventSource *EventSource
-
-					transport := &failingRoundTripper{
-						cb: func() {
-							go func() {
-								err := eventSource.Close()
-								Ω(err).ShouldNot(HaveOccurred())
-							}()
-						},
-					}
-
-					httpClient := http.Client{
-						Transport: transport,
-					}
-
-					eventSource = &EventSource{
-						Client:               &httpClient,
-						DefaultRetryInterval: 100 * time.Millisecond,
-						CreateRequest: func() *http.Request {
-							request, err := http.NewRequest("GET", originalURL, nil)
-							Ω(err).ShouldNot(HaveOccurred())
-
-							return request
-						},
-					}
-
-					Eventually(eventSource.Connect).Should(Equal(ErrSourceClosed))
-				})
-			})
-		})
-
-		// See http://www.w3.org/TR/eventsource/#processing-model for
-		// details on re-establishing the connection
-		Context("when the server consistently returns retryable errors", func() {
-			var gotOKChan chan struct{}
-
-			BeforeEach(func() {
-				gotOKChan = make(chan struct{})
-
-				server.AppendHandlers(
-					ghttp.RespondWith(http.StatusInternalServerError, ""),
-					ghttp.RespondWith(http.StatusInternalServerError, ""),
-					ghttp.RespondWith(http.StatusInternalServerError, ""),
-					func(rw http.ResponseWriter, r *http.Request) {
-						close(gotOKChan)
-						rw.WriteHeader(http.StatusOK)
-					},
-				)
-			})
-
-			It("retries indefinitely", func() {
-				Eventually(source.Connect).ShouldNot(HaveOccurred())
-				Ω(gotOKChan).Should(BeClosed())
-			})
 		})
 	})
 
@@ -560,14 +428,6 @@ var _ = Describe("EventSource", func() {
 					Ω(err).Should(Equal(ErrSourceClosed))
 				})
 			})
-
-			Context("when reconnecting", func() {
-				It("immediately returns ErrSourceClosed", func() {
-					err := source.Connect()
-					Ω(err).Should(Equal(ErrSourceClosed))
-
-				})
-			})
 		})
 
 		Context("when there are no more events", func() {
@@ -623,25 +483,6 @@ var _ = Describe("EventSource", func() {
 
 			It("returns io.EOF", func() {
 				Eventually(errChan).Should(Receive(Equal(io.EOF)))
-			})
-
-			Context("when calling Next again", func() {
-				var err error
-
-				BeforeEach(func() {
-					_, err = source.Next()
-				})
-
-				It("immediately returns ErrSourceClosed", func() {
-					Ω(err).Should(Equal(ErrSourceClosed))
-				})
-			})
-
-			Context("when reconnecting", func() {
-				It("immediately returns ErrSourceClosed", func() {
-					err := source.Connect()
-					Ω(err).Should(Equal(ErrSourceClosed))
-				})
 			})
 		})
 	})

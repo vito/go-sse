@@ -33,16 +33,41 @@ func (err BadResponseError) Error() string {
 // If an EOF is received, Next() returns io.EOF, and subsequent calls to Next()
 // will return early. To read new events, Connect() must be called.
 type EventSource struct {
-	Client               *http.Client
-	CreateRequest        func() *http.Request
-	DefaultRetryInterval time.Duration
+	client        *http.Client
+	createRequest func() *http.Request
 
 	currentReadCloser *ReadCloser
 	lastEventID       string
 	retryInterval     time.Duration
 	lock              sync.Mutex
-	lastEventIDLock   sync.Mutex
-	closed            chan struct{}
+
+	closeOnce *sync.Once
+	closed    chan struct{}
+}
+
+func NewEventSource(client *http.Client, defaultRetryInterval time.Duration, requestCreator func() *http.Request) *EventSource {
+	return &EventSource{
+		client:        client,
+		createRequest: requestCreator,
+
+		retryInterval: defaultRetryInterval,
+
+		closeOnce: new(sync.Once),
+		closed:    make(chan struct{}),
+	}
+}
+
+func Connect(client *http.Client, defaultRetryInterval time.Duration, requestCreator func() *http.Request) (*EventSource, error) {
+	source := NewEventSource(client, defaultRetryInterval, requestCreator)
+
+	readCloser, err := source.establishConnection()
+	if err != nil {
+		return nil, err
+	}
+
+	source.currentReadCloser = readCloser
+
+	return source, nil
 }
 
 func (source *EventSource) Next() (Event, error) {
@@ -53,16 +78,14 @@ func (source *EventSource) Next() (Event, error) {
 	}
 
 	for {
-		err := source.Connect()
+		readCloser, err := source.ensureReadCloser()
 		if err != nil {
 			return Event{}, err
 		}
 
-		event, err := source.currentReadCloser.Next()
+		event, err := readCloser.Next()
 		if err == nil {
-			source.lastEventIDLock.Lock()
 			source.lastEventID = event.ID
-			source.lastEventIDLock.Unlock()
 
 			if event.Retry != 0 {
 				source.retryInterval = event.Retry
@@ -72,22 +95,14 @@ func (source *EventSource) Next() (Event, error) {
 		}
 
 		if err == io.EOF {
-			_ = source.Close()
 			return Event{}, err
 		}
 
-		source.lock.Lock()
-		select {
-		case <-source.closed:
-			source.lock.Unlock()
-			return Event{}, ErrSourceClosed
-		default:
+		readCloser.Close()
+
+		if err := source.waitForRetry(); err != nil {
+			return Event{}, err
 		}
-
-		source.currentReadCloser = nil
-		source.lock.Unlock()
-
-		source.waitForRetry()
 	}
 
 	panic("unreachable")
@@ -96,91 +111,108 @@ func (source *EventSource) Next() (Event, error) {
 func (source *EventSource) Close() error {
 	source.lock.Lock()
 	defer source.lock.Unlock()
-	defer func() { source.currentReadCloser = nil }()
 
-	select {
-	case <-source.closed:
-	default:
-		if source.closed == nil {
-			source.closed = make(chan struct{})
-		}
+	source.closeOnce.Do(func() {
 		close(source.closed)
-	}
+	})
 
 	if source.currentReadCloser != nil {
 		err := source.currentReadCloser.Close()
 		if err != nil {
 			return err
 		}
+
+		source.currentReadCloser = nil
 	}
 
 	return nil
 }
 
-func (source *EventSource) Connect() error {
+func (source *EventSource) ensureReadCloser() (*ReadCloser, error) {
 	source.lock.Lock()
-	if source.currentReadCloser != nil {
-		source.lock.Unlock()
-		return nil
-	}
-	source.lock.Unlock()
 
-CONNECT:
-	for {
+	if source.currentReadCloser == nil {
+		source.lock.Unlock()
+
+		newReadCloser, err := source.establishConnection()
+		if err != nil {
+			return nil, err
+		}
+
+		source.lock.Lock()
+
 		select {
 		case <-source.closed:
-			return ErrSourceClosed
+			source.lock.Unlock()
+			newReadCloser.Close()
+			return nil, ErrSourceClosed
+
 		default:
-			source.lock.Lock()
-			req := source.CreateRequest()
+			source.currentReadCloser = newReadCloser
+		}
+	}
 
-			source.lastEventIDLock.Lock()
-			req.Header.Set("Last-Event-ID", source.lastEventID)
-			source.lastEventIDLock.Unlock()
+	readCloser := source.currentReadCloser
 
-			res, err := source.Client.Do(req)
+	source.lock.Unlock()
+
+	return readCloser, nil
+}
+
+func (source *EventSource) establishConnection() (*ReadCloser, error) {
+	for {
+		req := source.createRequest()
+
+		req.Header.Set("Last-Event-ID", source.lastEventID)
+
+		res, err := source.client.Do(req)
+		if err != nil {
+			err := source.waitForRetry()
 			if err != nil {
-				source.lock.Unlock()
-				source.waitForRetry()
-				continue CONNECT
+				return nil, err
 			}
 
-			switch res.StatusCode {
-			case http.StatusOK:
-				source.currentReadCloser = NewReadCloser(res.Body)
-				source.closed = make(chan struct{})
-				source.lock.Unlock()
-				return nil
+			continue
+		}
 
-			// reestablish the connection
-			case http.StatusInternalServerError,
-				http.StatusBadGateway,
-				http.StatusServiceUnavailable,
-				http.StatusGatewayTimeout:
-				res.Body.Close()
-				source.lock.Unlock()
-				source.waitForRetry()
-				continue CONNECT
+		switch res.StatusCode {
+		case http.StatusOK:
+			return NewReadCloser(res.Body), nil
 
-			// fail the connection
-			default:
-				source.lock.Unlock()
-				res.Body.Close()
+		// reestablish the connection
+		case http.StatusInternalServerError,
+			http.StatusBadGateway,
+			http.StatusServiceUnavailable,
+			http.StatusGatewayTimeout:
+			res.Body.Close()
 
-				return BadResponseError{
-					Response: res,
-				}
+			err := source.waitForRetry()
+			if err != nil {
+				return nil, err
+			}
+
+			continue
+
+		// fail the connection
+		default:
+			res.Body.Close()
+
+			return nil, BadResponseError{
+				Response: res,
 			}
 		}
 	}
 }
 
-func (source *EventSource) waitForRetry() {
-	if source.retryInterval != 0 {
-		time.Sleep(source.retryInterval)
-	} else if source.DefaultRetryInterval != 0 {
-		time.Sleep(source.DefaultRetryInterval)
-	} else {
-		time.Sleep(time.Second)
+func (source *EventSource) waitForRetry() error {
+	source.lock.Lock()
+	source.currentReadCloser = nil
+	source.lock.Unlock()
+
+	select {
+	case <-time.After(source.retryInterval):
+		return nil
+	case <-source.closed:
+		return ErrSourceClosed
 	}
 }

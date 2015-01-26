@@ -32,9 +32,8 @@ func (rc *ReadCloser) Close() error {
 	}
 
 	rc.closed = true
-	err := rc.closeSource()
 
-	return err
+	return rc.closeSource()
 }
 
 func (rc *ReadCloser) Next() (Event, error) {
