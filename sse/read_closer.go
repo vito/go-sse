@@ -49,6 +49,11 @@ func (rc *ReadCloser) Next() (Event, error) {
 	prefix := []byte{}
 	for {
 		line, isPrefix, err := rc.buf.ReadLine()
+
+		if err != nil && rc.closed {
+			return Event{}, io.EOF
+		}
+
 		if err != nil {
 			return Event{}, err
 		}

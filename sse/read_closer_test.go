@@ -329,10 +329,11 @@ data
 				done := make(chan struct{})
 
 				go func() {
-					GinkgoRecover()
+					defer GinkgoRecover()
 					for {
 						_, err := readCloser.Next()
 						if err != nil {
+							Ω(err).Should(MatchError(io.EOF))
 							close(done)
 							return
 						}
