@@ -299,48 +299,6 @@ var _ = Describe("EventSource", func() {
 		})
 	})
 
-	for _, retryableStatus := range []int{
-		http.StatusInternalServerError,
-		http.StatusBadGateway,
-		http.StatusServiceUnavailable,
-		http.StatusGatewayTimeout,
-	} {
-		status := retryableStatus
-
-		Context(fmt.Sprintf("when the server returns %d", status), func() {
-			BeforeEach(func() {
-				server.AppendHandlers(
-					ghttp.RespondWith(status, ""),
-					func(w http.ResponseWriter, r *http.Request) {
-						flusher := w.(http.Flusher)
-
-						w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
-						w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
-						w.Header().Add("Connection", "keep-alive")
-
-						w.WriteHeader(http.StatusOK)
-
-						flusher.Flush()
-
-						Event{
-							ID:   "1",
-							Data: []byte("you made it!"),
-						}.Write(w)
-
-						flusher.Flush()
-					},
-				)
-			})
-
-			It("transparently reconnects", func() {
-				Ω(source.Next()).Should(Equal(Event{
-					ID:   "1",
-					Data: []byte("you made it!"),
-				}))
-			})
-		})
-	}
-
 	Describe("handling errors while reading events", func() {
 		var eventChan chan Event
 		var errChan chan error
@@ -486,4 +444,243 @@ var _ = Describe("EventSource", func() {
 			})
 		})
 	})
+
+	Context("when max retries is specified", func() {
+		var (
+			retryParams RetryParams
+		)
+		BeforeEach(func() {
+			retryParams = RetryParams{
+				MaxRetries:    3,
+				RetryInterval: 100 * time.Millisecond,
+			}
+		})
+
+		Context("when event source is unavailable during initial connection", func() {
+			It("retries for specified max retries and returns an error", func() {
+				actualRetries := uint16(0)
+				src, err := ConnectWithParams(
+					http.DefaultClient,
+					retryParams,
+					func() *http.Request {
+						request, err := http.NewRequest("GET", "http://something.non.existent", nil)
+						Ω(err).ShouldNot(HaveOccurred())
+						actualRetries++
+						return request
+					},
+				)
+				Ω(err).To(HaveOccurred())
+				Ω(src).To(BeNil())
+				Ω(actualRetries).To(Equal(retryParams.MaxRetries + 1))
+			})
+		})
+
+		Context("when event source becomes unavailable after initial connection", func() {
+			Context("and stays unavailable for more than max retries", func() {
+				var (
+					localServer *ghttp.Server
+				)
+				BeforeEach(func() {
+					localServer = ghttp.NewServer()
+					retryParams = RetryParams{
+						MaxRetries:    2,
+						RetryInterval: 100 * time.Millisecond,
+					}
+
+					localServer.AppendHandlers(
+						func(w http.ResponseWriter, r *http.Request) {
+							flusher := w.(http.Flusher)
+
+							w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+							w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+							w.Header().Add("Connection", "keep-alive")
+
+							w.WriteHeader(http.StatusOK)
+
+							flusher.Flush()
+							localServer.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							localServer.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							localServer.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							localServer.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							flusher := w.(http.Flusher)
+
+							w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+							w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+							w.Header().Add("Connection", "keep-alive")
+
+							w.WriteHeader(http.StatusOK)
+
+							flusher.Flush()
+
+							Event{
+								ID:   "2",
+								Data: []byte("welcome back"),
+							}.Write(w)
+
+							flusher.Flush()
+
+							Event{
+								ID:    "3",
+								Data:  []byte("see you in a bit"),
+								Retry: 200 * time.Millisecond,
+							}.Write(w)
+
+							flusher.Flush()
+						},
+					)
+				})
+
+				It("retries for specified max retries and returns an error", func() {
+					actualRetries := uint16(0)
+					src, err := ConnectWithParams(
+						http.DefaultClient,
+						retryParams,
+						func() *http.Request {
+							request, err := http.NewRequest("GET", localServer.URL(), nil)
+							Ω(err).ShouldNot(HaveOccurred())
+							actualRetries++
+							return request
+						},
+					)
+					Ω(err).NotTo(HaveOccurred())
+					Ω(src).NotTo(BeNil())
+					_, err = src.Next()
+					Ω(err).To(HaveOccurred())
+					// Because actualRetries will be bumped by one during initial Connect
+					Ω(actualRetries).To(Equal(retryParams.MaxRetries + 2))
+				})
+			})
+
+			Context("and becomes available before max retries are reached", func() {
+				BeforeEach(func() {
+					retryParams = RetryParams{
+						MaxRetries:    3,
+						RetryInterval: 100 * time.Millisecond,
+					}
+					server.AppendHandlers(
+						func(w http.ResponseWriter, r *http.Request) {
+							flusher := w.(http.Flusher)
+
+							w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+							w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+							w.Header().Add("Connection", "keep-alive")
+
+							w.WriteHeader(http.StatusOK)
+
+							flusher.Flush()
+
+							server.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							server.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							server.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							server.CloseClientConnections()
+						},
+						func(w http.ResponseWriter, r *http.Request) {
+							flusher := w.(http.Flusher)
+
+							w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+							w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+							w.Header().Add("Connection", "keep-alive")
+
+							w.WriteHeader(http.StatusOK)
+
+							flusher.Flush()
+
+							Event{
+								ID:   "2",
+								Data: []byte("welcome back"),
+							}.Write(w)
+
+							flusher.Flush()
+
+							Event{
+								ID:    "3",
+								Data:  []byte("see you in a bit"),
+								Retry: 200 * time.Millisecond,
+							}.Write(w)
+
+							flusher.Flush()
+						},
+					)
+				})
+
+				It("returns event", func() {
+					actualRetries := uint16(0)
+					src, err := ConnectWithParams(
+						http.DefaultClient,
+						retryParams,
+						func() *http.Request {
+							request, err := http.NewRequest("GET", server.URL(), nil)
+							Ω(err).ShouldNot(HaveOccurred())
+							actualRetries++
+							return request
+						},
+					)
+					Ω(err).NotTo(HaveOccurred())
+					Ω(src).NotTo(BeNil())
+					Ω(src.Next()).Should(Equal(Event{
+						ID:   "2",
+						Data: []byte("welcome back"),
+					}))
+					Ω(actualRetries).To(Equal(retryParams.MaxRetries + 2))
+				})
+			})
+		})
+	})
+
+	for _, retryableStatus := range []int{
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		status := retryableStatus
+
+		Context(fmt.Sprintf("when the server returns %d", status), func() {
+			BeforeEach(func() {
+				server.AppendHandlers(
+					ghttp.RespondWith(status, ""),
+					func(w http.ResponseWriter, r *http.Request) {
+						flusher := w.(http.Flusher)
+
+						w.Header().Add("Content-Type", "text/event-stream; charset=utf-8")
+						w.Header().Add("Cache-Control", "no-cache, no-store, must-revalidate")
+						w.Header().Add("Connection", "keep-alive")
+
+						w.WriteHeader(http.StatusOK)
+
+						flusher.Flush()
+
+						Event{
+							ID:   "1",
+							Data: []byte("you made it!"),
+						}.Write(w)
+
+						flusher.Flush()
+					},
+				)
+			})
+
+			It("transparently reconnects", func() {
+				Ω(source.Next()).Should(Equal(Event{
+					ID:   "1",
+					Data: []byte("you made it!"),
+				}))
+			})
+		})
+	}
+
 })
