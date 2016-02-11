@@ -62,7 +62,11 @@ type Config struct {
 }
 
 func (c *Config) Connect() (*EventSource, error) {
-	source := createEventSource(c.Client, c.RetryParams, c.RequestCreator)
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	source := createEventSource(client, c.RetryParams, c.RequestCreator)
 
 	readCloser, err := source.establishConnection()
 	if err != nil {

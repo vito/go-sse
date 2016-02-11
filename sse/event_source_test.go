@@ -460,7 +460,6 @@ var _ = Describe("EventSource", func() {
 			It("retries for specified max retries and returns an error", func() {
 				actualRetries := uint16(0)
 				config := Config{
-					Client:      http.DefaultClient,
 					RetryParams: retryParams,
 					RequestCreator: func() *http.Request {
 						request, err := http.NewRequest("GET", "http://something.non.existent", nil)
