@@ -459,16 +459,17 @@ var _ = Describe("EventSource", func() {
 		Context("when event source is unavailable during initial connection", func() {
 			It("retries for specified max retries and returns an error", func() {
 				actualRetries := uint16(0)
-				src, err := ConnectWithParams(
-					http.DefaultClient,
-					retryParams,
-					func() *http.Request {
+				config := Config{
+					Client:      http.DefaultClient,
+					RetryParams: retryParams,
+					RequestCreator: func() *http.Request {
 						request, err := http.NewRequest("GET", "http://something.non.existent", nil)
 						Ω(err).ShouldNot(HaveOccurred())
 						actualRetries++
 						return request
 					},
-				)
+				}
+				src, err := config.Connect()
 				Ω(err).To(HaveOccurred())
 				Ω(src).To(BeNil())
 				Ω(actualRetries).To(Equal(retryParams.MaxRetries + 1))
@@ -540,16 +541,18 @@ var _ = Describe("EventSource", func() {
 
 				It("retries for specified max retries and returns an error", func() {
 					actualRetries := uint16(0)
-					src, err := ConnectWithParams(
-						http.DefaultClient,
-						retryParams,
-						func() *http.Request {
+					config := Config{
+						Client:      http.DefaultClient,
+						RetryParams: retryParams,
+						RequestCreator: func() *http.Request {
 							request, err := http.NewRequest("GET", localServer.URL(), nil)
 							Ω(err).ShouldNot(HaveOccurred())
 							actualRetries++
 							return request
 						},
-					)
+					}
+					src, err := config.Connect()
+
 					Ω(err).NotTo(HaveOccurred())
 					Ω(src).NotTo(BeNil())
 					_, err = src.Next()
@@ -619,16 +622,18 @@ var _ = Describe("EventSource", func() {
 
 				It("returns event", func() {
 					actualRetries := uint16(0)
-					src, err := ConnectWithParams(
-						http.DefaultClient,
-						retryParams,
-						func() *http.Request {
+					config := Config{
+						Client:      http.DefaultClient,
+						RetryParams: retryParams,
+						RequestCreator: func() *http.Request {
 							request, err := http.NewRequest("GET", server.URL(), nil)
 							Ω(err).ShouldNot(HaveOccurred())
 							actualRetries++
 							return request
 						},
-					)
+					}
+					src, err := config.Connect()
+
 					Ω(err).NotTo(HaveOccurred())
 					Ω(src).NotTo(BeNil())
 					Ω(src.Next()).Should(Equal(Event{
