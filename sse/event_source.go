@@ -208,6 +208,10 @@ func (source *EventSource) establishConnection() (*ReadCloser, error) {
 	for {
 		req := source.createRequest()
 
+		if req.Header == nil {
+			req.Header = http.Header{}
+		}
+
 		req.Header.Set("Last-Event-ID", source.lastEventID)
 
 		res, err := source.client.Do(req)
